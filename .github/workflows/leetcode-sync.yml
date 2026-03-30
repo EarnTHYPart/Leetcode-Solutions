@@ -1,0 +1,164 @@
+name: Sync LeetCode Solutions
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every day at 02:00 UTC
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Sync recent accepted submissions from LeetCode
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          LEETCODE_SYNC_LIMIT: ${{ vars.LEETCODE_SYNC_LIMIT || '20' }}
+        run: |
+          set -euo pipefail
+          mkdir -p solutions
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const session = process.env.LEETCODE_SESSION;
+          const csrf = process.env.LEETCODE_CSRF_TOKEN;
+          const username = process.env.LEETCODE_USERNAME;
+          const limit = Number(process.env.LEETCODE_SYNC_LIMIT || '20');
+
+          if (!session || !csrf || !username) {
+            throw new Error(
+              'Missing required secrets: LEETCODE_SESSION, LEETCODE_CSRF_TOKEN, LEETCODE_USERNAME'
+            );
+          }
+
+          const cookie = `LEETCODE_SESSION=${session}; csrftoken=${csrf}`;
+          const headers = {
+            'Content-Type': 'application/json',
+            'x-csrftoken': csrf,
+            Cookie: cookie,
+            Referer: 'https://leetcode.com/',
+          };
+
+          const extByLang = {
+            cpp: 'cpp',
+            c: 'c',
+            csharp: 'cs',
+            golang: 'go',
+            java: 'java',
+            javascript: 'js',
+            kotlin: 'kt',
+            mysql: 'sql',
+            'ms sql server': 'sql',
+            oracle: 'sql',
+            php: 'php',
+            python: 'py',
+            python3: 'py',
+            ruby: 'rb',
+            rust: 'rs',
+            scala: 'scala',
+            swift: 'swift',
+            typescript: 'ts',
+          };
+
+          const normalizeLang = (lang) => String(lang || '').trim().toLowerCase();
+
+          const recentSubmissionsQuery = `
+            query recentAcSubmissionList($username: String!, $limit: Int!) {
+              recentAcSubmissionList(username: $username, limit: $limit) {
+                id
+                title
+                titleSlug
+                timestamp
+              }
+            }
+          `;
+
+          async function requestJson(url, options) {
+            const res = await fetch(url, options);
+            if (!res.ok) {
+              const body = await res.text();
+              throw new Error(`Request failed (${res.status}): ${body.slice(0, 300)}`);
+            }
+            return res.json();
+          }
+
+          async function main() {
+            const graph = await requestJson('https://leetcode.com/graphql', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                query: recentSubmissionsQuery,
+                variables: { username, limit },
+              }),
+            });
+
+            const submissions = graph?.data?.recentAcSubmissionList || [];
+            if (!Array.isArray(submissions) || submissions.length === 0) {
+              console.log('No accepted submissions found.');
+              return;
+            }
+
+            let savedCount = 0;
+            for (const sub of submissions) {
+              const subId = sub?.id;
+              const slug = sub?.titleSlug;
+              if (!subId || !slug) {
+                continue;
+              }
+
+              const detail = await requestJson(`https://leetcode.com/api/submissions/${subId}/`, {
+                headers,
+              });
+
+              const lang = normalizeLang(detail?.lang);
+              const ext = extByLang[lang] || 'txt';
+              const code = detail?.code;
+
+              if (!code || !code.trim()) {
+                continue;
+              }
+
+              const safeSlug = String(slug).replace(/[^a-zA-Z0-9-]/g, '-');
+              const filePath = path.join('solutions', `${safeSlug}.${ext}`);
+              fs.writeFileSync(filePath, code.trimEnd() + '\n', 'utf8');
+              savedCount += 1;
+              console.log(`Synced ${filePath}`);
+            }
+
+            console.log(`Finished. Saved ${savedCount} file(s).`);
+          }
+
+          main().catch((err) => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Commit and push changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add solutions
+          if git diff --cached --quiet; then
+            echo "No solution changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync LeetCode solutions"
+          git push
