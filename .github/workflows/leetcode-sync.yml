@@ -25,8 +25,8 @@ jobs:
 
       - name: Sync recent accepted submissions from LeetCode
         env:
-          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
-          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION || secrets.LEETCODE_SESSION_TOKEN }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN || secrets.CSRF_TOKEN }}
           LEETCODE_USERNAME: ${{ vars.LEETCODE_USERNAME || 'EarnTHYPart' }}
           LEETCODE_SYNC_LIMIT: ${{ vars.LEETCODE_SYNC_LIMIT || '20' }}
         run: |
