@@ -158,19 +158,31 @@ jobs:
             }
 
             let savedCount = 0;
+            let skippedCount = 0;
             for (const sub of accepted) {
               const subId = sub?.id;
               const slug = sub?.titleSlug;
               if (!subId || !slug) {
+                skippedCount += 1;
                 continue;
               }
 
-              const detail = await requestSubmissionDetail(subId);
+              let detail;
+              try {
+                detail = await requestSubmissionDetail(subId);
+              } catch (err) {
+                skippedCount += 1;
+                console.warn(
+                  `Skipping submission ${subId}: ${err && err.message ? err.message : err}`
+                );
+                continue;
+              }
               const lang = normalizeLang(detail?.lang);
               const ext = extByLang[lang] || 'txt';
               const code = detail?.code;
 
               if (!code || !code.trim()) {
+                skippedCount += 1;
                 continue;
               }
 
@@ -181,7 +193,7 @@ jobs:
               console.log(`Synced ${filePath}`);
             }
 
-            console.log(`Finished. Saved ${savedCount} file(s).`);
+            console.log(`Finished. Saved ${savedCount} file(s), skipped ${skippedCount}.`);
           }
 
           main().catch((err) => {
