@@ -3,8 +3,8 @@ name: Sync LeetCode Solutions
 on:
   workflow_dispatch:
   schedule:
-    # Every day at 02:00 UTC
-    - cron: "0 2 * * *"
+    # Every Sunday at 04:00 UTC
+    - cron: "0 4 * * 0"
 
 permissions:
   contents: write
@@ -50,9 +50,11 @@ jobs:
           const cookie = `LEETCODE_SESSION=${session}; csrftoken=${csrf}`;
           const headers = {
             'Content-Type': 'application/json',
+            Accept: 'application/json',
             'x-csrftoken': csrf,
             Cookie: cookie,
             Referer: 'https://leetcode.com/',
+            'User-Agent': 'github-actions-leetcode-sync',
           };
 
           const extByLang = {
@@ -79,8 +81,8 @@ jobs:
           const normalizeLang = (lang) => String(lang || '').trim().toLowerCase();
 
           const recentSubmissionsQuery = `
-            query recentAcSubmissionList($username: String!, $limit: Int!) {
-              recentAcSubmissionList(username: $username, limit: $limit) {
+            query recentAcSubmissionList($username: String!) {
+              recentAcSubmissionList(username: $username) {
                 id
                 title
                 titleSlug
@@ -95,7 +97,32 @@ jobs:
               const body = await res.text();
               throw new Error(`Request failed (${res.status}): ${body.slice(0, 300)}`);
             }
+            const contentType = res.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+              const body = await res.text();
+              throw new Error(`Expected JSON from ${url} but got: ${body.slice(0, 300)}`);
+            }
             return res.json();
+          }
+
+          async function requestSubmissionDetail(subId) {
+            const urls = [
+              `https://leetcode.com/api/submissions/${subId}/`,
+              `https://leetcode.com/api/submissions/${subId}`,
+            ];
+
+            let lastError = null;
+            for (const url of urls) {
+              try {
+                const detail = await requestJson(url, { headers });
+                if (detail && detail.code) {
+                  return detail;
+                }
+              } catch (err) {
+                lastError = err;
+              }
+            }
+            throw lastError || new Error(`Unable to fetch submission detail for ID ${subId}`);
           }
 
           async function main() {
@@ -104,11 +131,16 @@ jobs:
               headers,
               body: JSON.stringify({
                 query: recentSubmissionsQuery,
-                variables: { username, limit },
+                variables: { username },
               }),
             });
 
-            const submissions = graph?.data?.recentAcSubmissionList || [];
+            if (Array.isArray(graph?.errors) && graph.errors.length > 0) {
+              const firstError = graph.errors[0]?.message || 'Unknown GraphQL error';
+              throw new Error(`LeetCode GraphQL error: ${firstError}`);
+            }
+
+            const submissions = (graph?.data?.recentAcSubmissionList || []).slice(0, limit);
             if (!Array.isArray(submissions) || submissions.length === 0) {
               console.log('No accepted submissions found.');
               return;
@@ -122,9 +154,7 @@ jobs:
                 continue;
               }
 
-              const detail = await requestJson(`https://leetcode.com/api/submissions/${subId}/`, {
-                headers,
-              });
+              const detail = await requestSubmissionDetail(subId);
 
               const lang = normalizeLang(detail?.lang);
               const ext = extByLang[lang] || 'txt';
