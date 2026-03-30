@@ -3,7 +3,6 @@ name: LeetCode Sync
 on:
   workflow_dispatch:
   schedule:
-    # Every Sunday at 04:00 UTC
     - cron: "0 4 * * 0"
 
 permissions:
@@ -12,6 +11,8 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,7 +48,7 @@ jobs:
 
           const cookie = `LEETCODE_SESSION=${session}; csrftoken=${csrf}`;
           const headers = {
-            Accept: 'application/json',
+            'Content-Type': 'application/json',
             'x-csrftoken': csrf,
             Cookie: cookie,
             Referer: 'https://leetcode.com/',
@@ -55,24 +56,12 @@ jobs:
           };
 
           const extByLang = {
-            cpp: 'cpp',
-            c: 'c',
-            csharp: 'cs',
-            golang: 'go',
-            java: 'java',
-            javascript: 'js',
-            kotlin: 'kt',
-            mysql: 'sql',
-            'ms sql server': 'sql',
-            oracle: 'sql',
-            php: 'php',
-            python: 'py',
-            python3: 'py',
-            ruby: 'rb',
-            rust: 'rs',
-            scala: 'scala',
-            swift: 'swift',
-            typescript: 'ts',
+            cpp: 'cpp', c: 'c', csharp: 'cs', golang: 'go',
+            java: 'java', javascript: 'js', kotlin: 'kt',
+            mysql: 'sql', 'ms sql server': 'sql', oracle: 'sql',
+            php: 'php', python: 'py', python3: 'py',
+            ruby: 'rb', rust: 'rs', scala: 'scala',
+            swift: 'swift', typescript: 'ts',
           };
 
           const normalizeLang = (lang) => String(lang || '').trim().toLowerCase();
@@ -81,117 +70,88 @@ jobs:
             return new Promise((resolve) => setTimeout(resolve, ms));
           }
 
-          async function requestJson(url, options) {
-            const res = await fetch(url, options);
-            const text = await res.text();
-
-            if (!res.ok) {
-              throw new Error(`Request failed (${res.status}) for ${url}: ${text.slice(0, 300)}`);
-            }
-
-            try {
-              return JSON.parse(text);
-            } catch {
-              throw new Error(`Expected JSON from ${url}, got: ${text.slice(0, 300)}`);
-            }
-          }
-
-          async function requestJsonWithRetry(url, options, retries = 3) {
+          async function graphql(query, variables = {}, retries = 3) {
             let lastErr;
-            for (let attempt = 1; attempt <= retries; attempt += 1) {
+            for (let attempt = 1; attempt <= retries; attempt++) {
               try {
-                return await requestJson(url, options);
+                const res = await fetch('https://leetcode.com/graphql', {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({ query, variables }),
+                });
+                const text = await res.text();
+                if (!res.ok) throw new Error(`GraphQL failed (${res.status}): ${text.slice(0, 300)}`);
+                const json = JSON.parse(text);
+                if (json.errors) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 300)}`);
+                return json.data;
               } catch (err) {
                 lastErr = err;
-                if (attempt < retries) {
-                  await sleep(500 * attempt);
-                }
+                if (attempt < retries) await sleep(500 * attempt);
               }
             }
             throw lastErr;
           }
 
-          async function requestSubmissionDetail(subId) {
-            const urls = [
-              `https://leetcode.com/api/submissions/${subId}/`,
-              `https://leetcode.com/api/submissions/${subId}`,
-            ];
-
-            let lastError = null;
-            for (const url of urls) {
-              try {
-                const detail = await requestJsonWithRetry(url, { headers });
-                if (detail && detail.code) {
-                  return detail;
+          async function fetchRecentAccepted(user, lim) {
+            const data = await graphql(`
+              query recentAcSubmissions($username: String!, $limit: Int!) {
+                recentAcSubmissionList(username: $username, limit: $limit) {
+                  id title titleSlug lang
                 }
-              } catch (err) {
-                lastError = err;
               }
-            }
-            throw lastError || new Error(`Unable to fetch submission detail for ID ${subId}`);
+            `, { username: user, limit: lim });
+            return data?.recentAcSubmissionList || [];
+          }
+
+          async function fetchSubmissionDetail(submissionId) {
+            const data = await graphql(`
+              query submissionDetails($submissionId: Int!) {
+                submissionDetails(submissionId: $submissionId) {
+                  code
+                  lang { name }
+                }
+              }
+            `, { submissionId: Number(submissionId) });
+            return data?.submissionDetails || null;
           }
 
           async function main() {
             console.log(`Sync start for user: ${username}`);
+            const submissions = await fetchRecentAccepted(username, limit);
 
-            const pageSize = Math.min(100, Math.max(20, limit * 2));
-            const list = await requestJsonWithRetry(
-              `https://leetcode.com/api/submissions/?offset=0&limit=${pageSize}`,
-              { headers }
-            );
-
-            const allSubs = Array.isArray(list?.submissions_dump) ? list.submissions_dump : [];
-
-            const accepted = allSubs
-              .filter((s) => s && String(s.status_display || '').toLowerCase() === 'accepted')
-              .slice(0, limit)
-              .map((s) => ({
-                id: s.id,
-                titleSlug: s.title_slug,
-              }));
-
-            if (accepted.length === 0) {
+            if (!submissions.length) {
               console.log('No accepted submissions found.');
               return;
             }
 
-            let savedCount = 0;
-            let skippedCount = 0;
-            for (const sub of accepted) {
-              const subId = sub?.id;
-              const slug = sub?.titleSlug;
-              if (!subId || !slug) {
-                skippedCount += 1;
-                continue;
-              }
+            console.log(`Found ${submissions.length} submission(s). Fetching code...`);
+            let savedCount = 0, skippedCount = 0;
 
+            for (const sub of submissions) {
+              const { id, titleSlug, lang } = sub;
               let detail;
               try {
-                detail = await requestSubmissionDetail(subId);
+                detail = await fetchSubmissionDetail(id);
               } catch (err) {
-                skippedCount += 1;
-                console.warn(
-                  `Skipping submission ${subId}: ${err && err.message ? err.message : err}`
-                );
+                skippedCount++;
+                console.warn(`Skipping ${titleSlug} (${id}): ${err?.message || err}`);
                 continue;
               }
 
-              const lang = normalizeLang(detail?.lang);
-              const ext = extByLang[lang] || 'txt';
               const code = detail?.code;
-
-              if (!code || !code.trim()) {
-                skippedCount += 1;
+              if (!code?.trim()) {
+                skippedCount++;
+                console.warn(`Skipping ${titleSlug} (${id}): empty code`);
                 continue;
               }
 
-              const safeSlug = String(slug).replace(/[^a-zA-Z0-9-]/g, '-');
+              const langName = normalizeLang(detail?.lang?.name || lang);
+              const ext = extByLang[langName] || 'txt';
+              const safeSlug = String(titleSlug).replace(/[^a-zA-Z0-9-]/g, '-');
               const filePath = path.join('solutions', `${safeSlug}.${ext}`);
               fs.writeFileSync(filePath, code.trimEnd() + '\n', 'utf8');
-              savedCount += 1;
+              savedCount++;
               console.log(`Synced ${filePath}`);
-
-              // Small delay to avoid rate limiting
               await sleep(300);
             }
 
@@ -199,7 +159,7 @@ jobs:
           }
 
           main().catch((err) => {
-            console.error('LeetCode sync failed:', err && err.message ? err.message : err);
+            console.error('LeetCode sync failed:', err?.message || err);
             process.exit(1);
           });
           NODE
