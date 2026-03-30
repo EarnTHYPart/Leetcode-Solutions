@@ -27,7 +27,7 @@ jobs:
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
-          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          LEETCODE_USERNAME: ${{ vars.LEETCODE_USERNAME || github.repository_owner }}
           LEETCODE_SYNC_LIMIT: ${{ vars.LEETCODE_SYNC_LIMIT || '20' }}
         run: |
           set -euo pipefail
@@ -41,9 +41,9 @@ jobs:
           const username = process.env.LEETCODE_USERNAME;
           const limit = Number(process.env.LEETCODE_SYNC_LIMIT || '20');
 
-          if (!session || !csrf || !username) {
+          if (!session || !csrf) {
             throw new Error(
-              'Missing required secrets: LEETCODE_SESSION, LEETCODE_CSRF_TOKEN, LEETCODE_USERNAME'
+              'Missing required secrets: LEETCODE_SESSION, LEETCODE_CSRF_TOKEN'
             );
           }
 
