@@ -39,7 +39,7 @@ jobs:
           const session = process.env.LEETCODE_SESSION;
           const csrf = process.env.LEETCODE_CSRF_TOKEN;
           const username = process.env.LEETCODE_USERNAME;
-          const limit = Number(process.env.LEETCODE_SYNC_LIMIT || '20');
+          const limit = Math.max(1, Number(process.env.LEETCODE_SYNC_LIMIT || '20'));
 
           if (!session || !csrf) {
             throw new Error(
@@ -80,16 +80,9 @@ jobs:
 
           const normalizeLang = (lang) => String(lang || '').trim().toLowerCase();
 
-          const recentSubmissionsQuery = `
-            query recentAcSubmissionList($username: String!) {
-              recentAcSubmissionList(username: $username) {
-                id
-                title
-                titleSlug
-                timestamp
-              }
-            }
-          `;
+          async function sleep(ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+          }
 
           async function requestJson(url, options) {
             const res = await fetch(url, options);
@@ -105,6 +98,21 @@ jobs:
             return res.json();
           }
 
+          async function requestJsonWithRetry(url, options, retries = 3) {
+            let lastErr;
+            for (let attempt = 1; attempt <= retries; attempt += 1) {
+              try {
+                return await requestJson(url, options);
+              } catch (err) {
+                lastErr = err;
+                if (attempt < retries) {
+                  await sleep(500 * attempt);
+                }
+              }
+            }
+            throw lastErr;
+          }
+
           async function requestSubmissionDetail(subId) {
             const urls = [
               `https://leetcode.com/api/submissions/${subId}/`,
@@ -114,7 +122,7 @@ jobs:
             let lastError = null;
             for (const url of urls) {
               try {
-                const detail = await requestJson(url, { headers });
+                const detail = await requestJsonWithRetry(url, { headers });
                 if (detail && detail.code) {
                   return detail;
                 }
@@ -126,28 +134,30 @@ jobs:
           }
 
           async function main() {
-            const graph = await requestJson('https://leetcode.com/graphql', {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                query: recentSubmissionsQuery,
-                variables: { username },
-              }),
-            });
+            console.log(`Sync start for user: ${username}`);
 
-            if (Array.isArray(graph?.errors) && graph.errors.length > 0) {
-              const firstError = graph.errors[0]?.message || 'Unknown GraphQL error';
-              throw new Error(`LeetCode GraphQL error: ${firstError}`);
-            }
+            const pageSize = Math.min(100, Math.max(20, limit * 2));
+            const list = await requestJsonWithRetry(
+              `https://leetcode.com/api/submissions/?offset=0&limit=${pageSize}`,
+              { headers }
+            );
 
-            const submissions = (graph?.data?.recentAcSubmissionList || []).slice(0, limit);
-            if (!Array.isArray(submissions) || submissions.length === 0) {
+            const allSubs = Array.isArray(list?.submissions_dump) ? list.submissions_dump : [];
+            const accepted = allSubs
+              .filter((s) => s && (s.status_display === 'Accepted' || s.status_display === 'ac'))
+              .slice(0, limit)
+              .map((s) => ({
+                id: s.id,
+                titleSlug: s.title_slug,
+              }));
+
+            if (accepted.length === 0) {
               console.log('No accepted submissions found.');
               return;
             }
 
             let savedCount = 0;
-            for (const sub of submissions) {
+            for (const sub of accepted) {
               const subId = sub?.id;
               const slug = sub?.titleSlug;
               if (!subId || !slug) {
@@ -175,7 +185,7 @@ jobs:
           }
 
           main().catch((err) => {
-            console.error(err);
+            console.error('LeetCode sync failed:', err && err.message ? err.message : err);
             process.exit(1);
           });
           NODE
