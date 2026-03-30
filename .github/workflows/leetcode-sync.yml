@@ -12,23 +12,21 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "20"
 
       - name: Sync recent accepted submissions from LeetCode
         env:
-          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION_TOKEN }}
-          LEETCODE_CSRF_TOKEN: ${{ secrets.CSRF_TOKEN }}
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           LEETCODE_USERNAME: ${{ vars.LEETCODE_USERNAME || 'EarnTHYPart' }}
           LEETCODE_SYNC_LIMIT: ${{ vars.LEETCODE_SYNC_LIMIT || '20' }}
         run: |
@@ -44,7 +42,7 @@ jobs:
           const limit = Math.max(1, Number(process.env.LEETCODE_SYNC_LIMIT || '20'));
 
           if (!session || !csrf) {
-            throw new Error('Missing required secrets: LEETCODE_SESSION_TOKEN and CSRF_TOKEN');
+            throw new Error('Missing required secrets: LEETCODE_SESSION and LEETCODE_CSRF_TOKEN');
           }
 
           const cookie = `LEETCODE_SESSION=${session}; csrftoken=${csrf}`;
@@ -177,6 +175,7 @@ jobs:
                 );
                 continue;
               }
+
               const lang = normalizeLang(detail?.lang);
               const ext = extByLang[lang] || 'txt';
               const code = detail?.code;
@@ -191,6 +190,9 @@ jobs:
               fs.writeFileSync(filePath, code.trimEnd() + '\n', 'utf8');
               savedCount += 1;
               console.log(`Synced ${filePath}`);
+
+              // Small delay to avoid rate limiting
+              await sleep(300);
             }
 
             console.log(`Finished. Saved ${savedCount} file(s), skipped ${skippedCount}.`);
