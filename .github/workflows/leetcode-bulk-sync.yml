@@ -1,0 +1,203 @@
+name: LeetCode Bulk Sync (One-Time)
+run-name: LeetCode Bulk Sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bulk-sync:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Bulk sync all accepted submissions from LeetCode
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p solutions
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const session = process.env.LEETCODE_SESSION;
+          const csrf = process.env.LEETCODE_CSRF_TOKEN;
+
+          if (!session || !csrf) {
+            throw new Error('Missing required secrets: LEETCODE_SESSION and LEETCODE_CSRF_TOKEN');
+          }
+
+          const cookie = `LEETCODE_SESSION=${session}; csrftoken=${csrf}`;
+          const headers = {
+            'Content-Type': 'application/json',
+            'x-csrftoken': csrf,
+            Cookie: cookie,
+            Referer: 'https://leetcode.com/',
+            'User-Agent': 'github-actions-leetcode-sync',
+          };
+
+          const extByLang = {
+            cpp: 'cpp', c: 'c', csharp: 'cs', golang: 'go',
+            java: 'java', javascript: 'js', kotlin: 'kt',
+            mysql: 'sql', 'ms sql server': 'sql', oracle: 'sql',
+            php: 'php', python: 'py', python3: 'py',
+            ruby: 'rb', rust: 'rs', scala: 'scala',
+            swift: 'swift', typescript: 'ts',
+          };
+
+          const normalizeLang = (lang) => String(lang || '').trim().toLowerCase();
+
+          async function sleep(ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+          }
+
+          async function fetchPage(offset, limit = 20) {
+            const res = await fetch(
+              `https://leetcode.com/api/submissions/?offset=${offset}&limit=${limit}`,
+              { headers: { ...headers, Accept: 'application/json' } }
+            );
+            const text = await res.text();
+            if (!res.ok) throw new Error(`Submissions list failed (${res.status}): ${text.slice(0, 300)}`);
+            return JSON.parse(text);
+          }
+
+          async function fetchAllAccepted() {
+            const accepted = [];
+            let offset = 0;
+            const pageSize = 20;
+
+            console.log('Paginating through all submissions...');
+            while (true) {
+              let page;
+              try {
+                page = await fetchPage(offset, pageSize);
+              } catch (err) {
+                console.warn(`Failed to fetch page at offset ${offset}: ${err.message}`);
+                break;
+              }
+
+              const subs = Array.isArray(page?.submissions_dump) ? page.submissions_dump : [];
+              if (subs.length === 0) break;
+
+              for (const s of subs) {
+                if (String(s.status_display || '').toLowerCase() === 'accepted') {
+                  // Only keep the latest accepted submission per problem
+                  if (!accepted.find(a => a.titleSlug === s.title_slug)) {
+                    accepted.push({ id: s.id, titleSlug: s.title_slug, lang: s.lang });
+                  }
+                }
+              }
+
+              console.log(`  Offset ${offset}: fetched ${subs.length} submissions, ${accepted.length} unique accepted so far`);
+
+              if (!page.has_next) break;
+              offset += pageSize;
+              await sleep(600); // be polite to LeetCode's servers
+            }
+
+            return accepted;
+          }
+
+          async function fetchSubmissionDetail(submissionId, titleSlug) {
+            const query = `
+              query submissionDetails($submissionId: Int!) {
+                submissionDetails(submissionId: $submissionId) {
+                  code
+                  lang { name }
+                }
+              }
+            `;
+            const res = await fetch('https://leetcode.com/graphql', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ query, variables: { submissionId: Number(submissionId) } }),
+            });
+            const text = await res.text();
+            if (!res.ok) throw new Error(`GraphQL failed (${res.status}): ${text.slice(0, 300)}`);
+            const json = JSON.parse(text);
+            if (json.errors) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 300)}`);
+            return json.data?.submissionDetails || null;
+          }
+
+          async function main() {
+            console.log('Starting bulk sync...');
+
+            const accepted = await fetchAllAccepted();
+            console.log(`\nTotal unique accepted problems: ${accepted.length}`);
+
+            if (!accepted.length) {
+              console.log('Nothing to sync.');
+              return;
+            }
+
+            let savedCount = 0;
+            let skippedCount = 0;
+
+            for (let i = 0; i < accepted.length; i++) {
+              const { id, titleSlug, lang } = accepted[i];
+              console.log(`[${i + 1}/${accepted.length}] Fetching ${titleSlug}...`);
+
+              let detail;
+              try {
+                detail = await fetchSubmissionDetail(id, titleSlug);
+              } catch (err) {
+                skippedCount++;
+                console.warn(`  Skipped: ${err?.message || err}`);
+                await sleep(1000);
+                continue;
+              }
+
+              const code = detail?.code;
+              if (!code?.trim()) {
+                skippedCount++;
+                console.warn(`  Skipped: empty code`);
+                continue;
+              }
+
+              const langName = normalizeLang(detail?.lang?.name || lang);
+              const ext = extByLang[langName] || 'txt';
+              const safeSlug = String(titleSlug).replace(/[^a-zA-Z0-9-]/g, '-');
+              const filePath = path.join('solutions', `${safeSlug}.${ext}`);
+
+              fs.writeFileSync(filePath, code.trimEnd() + '\n', 'utf8');
+              savedCount++;
+              console.log(`  Saved ${filePath}`);
+
+              await sleep(500); // avoid rate limiting
+            }
+
+            console.log(`\nDone! Saved ${savedCount} file(s), skipped ${skippedCount}.`);
+          }
+
+          main().catch((err) => {
+            console.error('Bulk sync failed:', err?.message || err);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Commit and push changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add solutions
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: bulk sync all LeetCode solutions"
+          git push
