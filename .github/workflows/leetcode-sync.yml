@@ -14,8 +14,8 @@ jobs:
               uses: joshcai/leetcode-sync@v1.7
                 with:
                     github-token: ${{ github.token }}
-                    leetcode-csrf-token: ${{ secrets.LEETCODE_USERNAME }}
-                    leetcode-session: ${{ secrets.LEETCODE_PASSWORD }}
+                    leetcode-csrf-token: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+                    leetcode-session: ${{ secrets.LEETCODE_SESSION }}
                     destination-folder: "Leetcode"
                     verbose: true  
                     commit-header: "{Leetcode sync}"
